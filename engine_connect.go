@@ -208,6 +208,8 @@ func (e *engine) attachTransport(tr *transport.Conn) {
 		for payload := range tr.Incoming() {
 			msgs, err := codec.DecodeBatch(sv, payload)
 			if err != nil {
+				e.cfg.logger.Error("ibkr: fatal inbound frame decode failed",
+					"server_version", sv, "payload_bytes", len(payload), "error", err)
 				_ = tr.Close()
 				result = &ProtocolError{Direction: "inbound", Err: err}
 				return
