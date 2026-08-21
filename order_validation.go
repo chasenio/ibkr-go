@@ -32,7 +32,7 @@ func validateOrderRequest(req PlaceOrderRequest) error {
 	if err := validateOrderTIF(order); err != nil {
 		return err
 	}
-	if err := validateOrderID("Order.ParentID", order.ParentID, true); err != nil {
+	if err := validateExistingOrderID("Order.ParentID", order.ParentID, true); err != nil {
 		return err
 	}
 	if order.DisplaySize < 0 {
@@ -72,6 +72,7 @@ func validateOrderRequest(req PlaceOrderRequest) error {
 }
 
 const maxWireOrderID = int64(math.MaxInt32)
+const minWireOrderID = int64(math.MinInt32)
 
 func validateOrderID(field string, orderID int64, allowZero bool) error {
 	minimum := int64(1)
@@ -81,6 +82,20 @@ func validateOrderID(field string, orderID int64, allowZero bool) error {
 		message = "must be between 0 and 2147483647"
 	}
 	if orderID < minimum || orderID > maxWireOrderID {
+		return invalidOrderField(field, orderID, message)
+	}
+	return nil
+}
+
+// validateExistingOrderID accepts the signed int32 IDs used by existing
+// orders. Client ID 0 can bind manual TWS orders to negative API order IDs.
+// Newly allocated order IDs still use validateOrderID and remain positive.
+func validateExistingOrderID(field string, orderID int64, allowZero bool) error {
+	if orderID < minWireOrderID || orderID > maxWireOrderID || (!allowZero && orderID == 0) {
+		message := "must be a non-zero signed 32-bit integer"
+		if allowZero {
+			message = "must be a signed 32-bit integer"
+		}
 		return invalidOrderField(field, orderID, message)
 	}
 	return nil

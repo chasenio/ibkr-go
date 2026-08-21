@@ -2,10 +2,26 @@ package ibkr
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/shopspring/decimal"
 )
+
+func TestValidateExistingOrderIDAcceptsBoundManualOrderID(t *testing.T) {
+	t.Parallel()
+
+	for _, orderID := range []int64{-2, math.MinInt32, 1, math.MaxInt32} {
+		if err := validateExistingOrderID("OrderID", orderID, false); err != nil {
+			t.Errorf("validateExistingOrderID(%d) = %v", orderID, err)
+		}
+	}
+	for _, orderID := range []int64{0, math.MinInt32 - 1, math.MaxInt32 + 1} {
+		if err := validateExistingOrderID("OrderID", orderID, false); err == nil {
+			t.Errorf("validateExistingOrderID(%d) error = nil", orderID)
+		}
+	}
+}
 
 func TestValidateOrderRequest(t *testing.T) {
 	t.Parallel()
@@ -199,6 +215,13 @@ func TestValidateOrderRequestAcceptsAdvancedShapes(t *testing.T) {
 		name string
 		req  PlaceOrderRequest
 	}{
+		{
+			name: "bound manual parent order",
+			req: PlaceOrderRequest{
+				Contract: Contract{ConID: 265598},
+				Order:    Order{Action: ActionBuy, OrderType: OrderTypeLimit, Quantity: decimal.NewFromInt(1), LmtPrice: new(decimal.NewFromInt(150)), ParentID: -2},
+			},
+		},
 		{
 			name: "cash quantity",
 			req: PlaceOrderRequest{
