@@ -104,6 +104,14 @@ func TestToCodecPlaceOrderSendsDayWhenTIFEmpty(t *testing.T) {
 	}
 }
 
+func TestToCodecPlaceOrderPreservesBoundManualOrderID(t *testing.T) {
+	t.Parallel()
+
+	if got := toCodecPlaceOrder(-2, PlaceOrderRequest{}).OrderID; got != -2 {
+		t.Fatalf("toCodecPlaceOrder(-2).OrderID = %d", got)
+	}
+}
+
 func TestToCodecPlaceOrderMapsAdvancedOrderFields(t *testing.T) {
 	t.Parallel()
 

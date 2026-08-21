@@ -583,7 +583,7 @@ func (e *engine) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (*OrderH
 // ReplaceOrder modifies an existing order by its stable IBKR order ID without
 // creating or depending on a process-local OrderHandle.
 func (e *engine) ReplaceOrder(ctx context.Context, orderID int64, req PlaceOrderRequest) error {
-	if err := validateOrderID("OrderID", orderID, false); err != nil {
+	if err := validateExistingOrderID("OrderID", orderID, false); err != nil {
 		return err
 	}
 	if err := validateOrderRequest(req); err != nil {
@@ -844,7 +844,7 @@ func (e *engine) PreviewOrder(ctx context.Context, req PlaceOrderRequest) (Order
 // fire-and-forget; the cancellation result arrives via the OrderHandle's
 // events channel as an OrderStatus with Status "Cancelled".
 func (e *engine) CancelOrder(ctx context.Context, orderID int64, cfg cancelConfig) error {
-	if err := validateOrderID("OrderID", orderID, false); err != nil {
+	if err := validateExistingOrderID("OrderID", orderID, false); err != nil {
 		return err
 	}
 	return awaitFireAndForget(ctx, e, func(ctx context.Context) error {
