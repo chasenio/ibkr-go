@@ -36,6 +36,14 @@ func TestCancelOrderRejectsIDOutsideWireRangeBeforeEnqueue(t *testing.T) {
 	}
 }
 
+func TestReplaceOrderRejectsIDOutsideWireRangeBeforeEnqueue(t *testing.T) {
+	err := new(engine).ReplaceOrder(context.Background(), maxWireOrderID+1, PlaceOrderRequest{})
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "OrderID" {
+		t.Fatalf("ReplaceOrder() error = %#v, want OrderID ValidationError", err)
+	}
+}
+
 func TestCancelOptionsRejectInvalidValues(t *testing.T) {
 	t.Parallel()
 

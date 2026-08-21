@@ -578,6 +578,27 @@ func (e *engine) PlaceOrder(ctx context.Context, req PlaceOrderRequest) (*OrderH
 	return awaitPlaceOrderResponse(ctx, e, resp)
 }
 
+// ReplaceOrder modifies an existing order by its stable IBKR order ID without
+// creating or depending on a process-local OrderHandle.
+func (e *engine) ReplaceOrder(ctx context.Context, orderID int64, req PlaceOrderRequest) error {
+	if err := validateOrderID("OrderID", orderID, false); err != nil {
+		return err
+	}
+	if err := validateOrderRequest(req); err != nil {
+		return err
+	}
+	req = clonePlaceOrderRequest(req)
+	return awaitFireAndForget(ctx, e, func(ctx context.Context) error {
+		if err := validateContractFieldSupport(req.Contract, "modify order", e.serverVersion, placeOrderContractFields(e.serverVersion)); err != nil {
+			return err
+		}
+		if err := validateOrderServerVersion(req.Order, e.serverVersion); err != nil {
+			return err
+		}
+		return e.sendContext(ctx, toCodecPlaceOrder(orderID, req))
+	})
+}
+
 // PlaceBracket allocates three consecutive order IDs and sends the parent,
 // take-profit, and stop-loss in one actor turn. The first two orders are staged
 // with Transmit=false; the final child is transmitted and releases the bracket.
