@@ -10,6 +10,26 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestEncodeBoundManualOrderIDPreservesNegativeValue(t *testing.T) {
+	t.Parallel()
+
+	payload, err := Encode(223, PlaceOrderRequest{OrderID: -2})
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if len(payload) < 6 {
+		t.Fatalf("Encode() payload too short: %x", payload)
+	}
+	number, typ, tagLen := protowire.ConsumeTag(payload[4:])
+	if tagLen < 0 || number != 1 || typ != protowire.VarintType {
+		t.Fatalf("order id tag = number %d type %d len %d", number, typ, tagLen)
+	}
+	value, valueLen := protowire.ConsumeVarint(payload[4+tagLen:])
+	if valueLen < 0 || int32(value) != -2 { //nolint:gosec // protobuf int32 is a sign-extended varint
+		t.Fatalf("encoded order id = %d (wire %x), want -2", int32(value), payload[4:])
+	}
+}
+
 func TestEncodeServer203OrderRequestVectors(t *testing.T) {
 	t.Parallel()
 

@@ -12,6 +12,60 @@ import (
 	"github.com/ThomasMarcelis/ibkr-go/v2/internal/wire"
 )
 
+func TestOpenOrdersSnapshotReusesCompletedTransportGeneration(t *testing.T) {
+	t.Parallel()
+
+	e, peer := newObservedMarketDataEngine(t)
+
+	runSnapshot := func() []OpenOrder {
+		t.Helper()
+		result := make(chan struct {
+			orders []OpenOrder
+			err    error
+		}, 1)
+		go func() {
+			orders, err := e.OpenOrdersSnapshot(context.Background(), OpenOrdersScopeAll)
+			result <- struct {
+				orders []OpenOrder
+				err    error
+			}{orders: orders, err: err}
+		}()
+
+		(<-e.cmds)()
+		_ = readObservedFrame(t, peer)
+		e.handleIncoming(codec.OpenOrderEnd{})
+
+		out := <-result
+		if out.err != nil {
+			t.Fatalf("OpenOrdersSnapshot() error = %v", out.err)
+		}
+		if len(out.orders) != 0 {
+			t.Fatalf("OpenOrdersSnapshot() = %+v, want empty snapshot", out.orders)
+		}
+		// The deferred public Close observes that openOrderEnd already
+		// released the route. Execute it to prove it cannot dirty the key.
+		(<-e.cmds)()
+		return out.orders
+	}
+
+	firstTransport := e.transport
+	runSnapshot()
+	if _, ok := e.singletons[singletonOpenOrders]; ok {
+		t.Fatal("completed snapshot retained the open-orders route")
+	}
+	if e.singletonGenerationDirty(singletonOpenOrders) {
+		t.Fatal("completed snapshot dirtied the open-orders generation")
+	}
+	if e.retiringTransport != nil || e.transport != firstTransport {
+		t.Fatal("completed snapshot retired its healthy transport")
+	}
+
+	runSnapshot()
+	if e.retiringTransport != nil || e.transport != firstTransport {
+		t.Fatal("repeated snapshot rotated its healthy transport")
+	}
+}
+
 // TestAutoOpenOrdersCloseDisablesBinding freezes the request lifecycle already
 // represented by codec.CancelOpenOrders: reqAutoOpenOrders(true) persistently
 // binds future manual orders, so closing the subscription must pair it with

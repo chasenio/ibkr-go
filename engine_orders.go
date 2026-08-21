@@ -131,6 +131,17 @@ func (e *engine) SubscribeOpenOrders(ctx context.Context, scope OpenOrdersScope,
 				if scope != OpenOrdersScopeAuto {
 					refreshPending = false
 					sub.emitState(StreamSnapshotComplete, e.connectionSeq(), nil)
+					// A snapshot collector is a finite reqOpenOrders or
+					// reqAllOpenOrders request. openOrderEnd is the broker's
+					// authoritative response boundary, so there can be no late
+					// snapshot rows to collide with a subsequent request. Release
+					// the request-ID-less route here instead of sending it through
+					// the generic subscription Close path, which must conservatively
+					// dirty the connection generation for persistent streams.
+					if cfg.collectSnapshot && e.singletons[singletonOpenOrders] == ownedRoute {
+						delete(e.singletons, singletonOpenOrders)
+						sub.closeWithErr(nil)
+					}
 				}
 			}
 		}
