@@ -338,6 +338,13 @@ func (c OrdersClient) Place(ctx context.Context, req PlaceOrderRequest) (*OrderH
 	return c.engine.PlaceOrder(ctx, req)
 }
 
+// Replace re-sends a complete order using an existing IBKR order ID. Unlike
+// OrderHandle.Replace, it does not require this client process to have placed
+// the order or retained an OrderHandle.
+func (c OrdersClient) Replace(ctx context.Context, orderID int64, req PlaceOrderRequest) error {
+	return c.engine.ReplaceOrder(ctx, orderID, req)
+}
+
 // PlaceBracket submits a parent, take-profit, and stop-loss as one safely
 // sequenced bracket. It allocates the three IDs together and controls ParentID
 // and Transmit so the final child releases the complete bracket atomically. A
