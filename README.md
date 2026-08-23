@@ -39,6 +39,12 @@ for update := range sub.All(ctx) {
 return sub.Err()
 ```
 
+For normal process termination, call `Client.Shutdown(ctx)`. It stops new
+work, flushes the broker-side cancellation attached to every active
+subscription, then closes the shared socket. If the shutdown budget expires it
+forces the socket closed and returns the context error. `Client.Close()`
+remains the immediate, non-draining path.
+
 ## Install
 
 ```bash

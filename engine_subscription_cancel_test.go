@@ -42,6 +42,76 @@ func TestCanceledSingletonRetiresTransportBeforeReplacement(t *testing.T) {
 	}
 }
 
+func TestAccountSummaryGivenTwoCancelWritesPendingThenThirdSubscriptionIsRejected(t *testing.T) {
+	t.Parallel()
+
+	e, peer := newObservedMarketDataEngine(t)
+	subscribe := func(tag string) (*Subscription[AccountValue], error) {
+		result := make(chan struct {
+			sub *Subscription[AccountValue]
+			err error
+		}, 1)
+		go func() {
+			sub, err := e.SubscribeAccountSummary(context.Background(), AccountSummaryRequest{
+				Group: "All",
+				Tags:  []string{tag},
+			})
+			result <- struct {
+				sub *Subscription[AccountValue]
+				err error
+			}{sub: sub, err: err}
+		}()
+		(<-e.cmds)()
+		out := <-result
+		return out.sub, out.err
+	}
+
+	first, err := subscribe("NetLiquidation")
+	if err != nil {
+		t.Fatalf("first SubscribeAccountSummary() error = %v", err)
+	}
+	_ = readObservedFrame(t, peer)
+	second, err := subscribe("TotalCashValue")
+	if err != nil {
+		t.Fatalf("second SubscribeAccountSummary() error = %v", err)
+	}
+	_ = readObservedFrame(t, peer)
+
+	// Do not read the cancellation frames. net.Pipe keeps the first write
+	// blocked, preserving both admitted cancellations in the engine.
+	first.Close()
+	(<-e.cmds)()
+	second.Close()
+	(<-e.cmds)()
+	if err := first.Wait(); err != nil {
+		t.Fatalf("first Wait() error = %v", err)
+	}
+	if err := second.Wait(); err != nil {
+		t.Fatalf("second Wait() error = %v", err)
+	}
+
+	third, err := subscribe("ExcessLiquidity")
+	if third != nil {
+		third.Close()
+	}
+	if !errors.Is(err, ErrOperationActive) {
+		t.Fatalf("third SubscribeAccountSummary() error = %v, want ErrOperationActive while cancels are pending", err)
+	}
+
+	for range 2 {
+		_ = readObservedFrame(t, peer)
+		result := <-e.transport.Completions()
+		e.handleTransportWrite(transportWrite{transport: e.transport, result: result})
+	}
+	fourth, err := subscribe("AvailableFunds")
+	if err != nil {
+		t.Fatalf("SubscribeAccountSummary() after cancel writes completed error = %v", err)
+	}
+	_ = readObservedFrame(t, peer)
+	fourth.Close()
+	(<-e.cmds)()
+}
+
 func TestOpenOrdersCloseDuringRefreshRetiresResponseOwner(t *testing.T) {
 	t.Parallel()
 

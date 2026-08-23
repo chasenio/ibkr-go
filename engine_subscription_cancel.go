@@ -1,7 +1,9 @@
 package ibkr
 
 import (
+	"context"
 	"errors"
+	"time"
 
 	"github.com/ThomasMarcelis/ibkr-go/v2/internal/codec"
 )
@@ -38,7 +40,10 @@ func (e *engine) cancelCurrentRequest(opKind OpKind, msg codec.Message) error {
 	default:
 	}
 
-	if err := e.send(msg); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	write, err := e.sendTrackedContext(ctx, msg)
+	if err != nil {
 		// Transport loss racing cancellation also destroys the remote stream;
 		// only a failure on the still-active connection is uncertain.
 		select {
@@ -48,6 +53,10 @@ func (e *engine) cancelCurrentRequest(opKind OpKind, msg codec.Message) error {
 			return &SubscriptionCancelError{OpKind: opKind, Err: err}
 		}
 	}
+	if e.pendingSubscriptionCancels == nil {
+		e.pendingSubscriptionCancels = make(map[transportWriteKey]OpKind)
+	}
+	e.pendingSubscriptionCancels[write] = opKind
 	return nil
 }
 

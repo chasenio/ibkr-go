@@ -1,6 +1,7 @@
 package ibkr
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -16,6 +17,248 @@ import (
 	"github.com/ThomasMarcelis/ibkr-go/v2/internal/transport"
 	"github.com/ThomasMarcelis/ibkr-go/v2/internal/wire"
 )
+
+func TestClientShutdownGivenActiveAccountSummaryThenWritesCancelBeforeDisconnect(t *testing.T) {
+	t.Parallel()
+
+	peer, local := net.Pipe()
+	defer peer.Close()
+
+	tr := transport.New(local, nil, 0)
+	cfg := defaultConfig()
+	sub := newSubscription[AccountValue](defaultSubscriptionConfig(cfg), func() {})
+	positions := newSubscription[Position](defaultSubscriptionConfig(cfg), func() {})
+	cancel := codec.CancelAccountSummary{ReqID: 42}
+	cancelPositions := codec.CancelPositions{}
+	e := &engine{
+		cfg:                 cfg,
+		cmds:                make(chan func(), 8),
+		incoming:            make(chan any, 8),
+		transportErr:        make(chan transportLoss, 1),
+		connectResults:      make(chan connectResult),
+		ready:               make(chan error, 1),
+		done:                make(chan struct{}),
+		events:              newObserver[Event](cfg.eventBuffer),
+		transport:           tr,
+		transportGeneration: 3,
+		serverVersion:       200,
+		keyed: map[int]*route{
+			42: {
+				opKind:        OpAccountSummary,
+				subscription:  true,
+				cancelRequest: cancel,
+				generation:    3,
+				close:         sub.closeWithErr,
+			},
+		},
+		singletons: map[string]*route{
+			singletonPositions: {
+				opKind:        OpPositions,
+				subscription:  true,
+				cancelRequest: cancelPositions,
+				generation:    3,
+				close:         positions.closeWithErr,
+			},
+		},
+		orders:         make(map[int64]*orderRoute),
+		previews:       make(map[int64]*previewRoute),
+		execDeliveries: make(map[string]*execDelivery),
+		snapshot:       Snapshot{State: StateReady, ConnectionSeq: 3},
+	}
+	e.attachTransport(tr)
+	go e.run()
+
+	frames := make(chan [][]byte, 1)
+	readErr := make(chan error, 1)
+	go func() {
+		payloads := make([][]byte, 0, 2)
+		for range 2 {
+			payload, err := wire.ReadFrame(peer)
+			if err != nil {
+				readErr <- err
+				return
+			}
+			payloads = append(payloads, payload)
+		}
+		frames <- payloads
+	}()
+
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- (&Client{engine: e}).Shutdown(ctx) }()
+
+	var payloads [][]byte
+	select {
+	case payloads = <-frames:
+	case err := <-readErr:
+		t.Fatalf("read first shutdown frame: %v", err)
+	case <-ctx.Done():
+		t.Fatal("Shutdown did not write cancelAccountSummary before its deadline")
+	}
+	want, err := codec.Encode(200, cancel)
+	if err != nil {
+		t.Fatalf("encode expected cancelAccountSummary: %v", err)
+	}
+	if !bytes.Equal(payloads[0], want) {
+		t.Fatalf("first shutdown frame = %x, want cancelAccountSummary %x", payloads[0], want)
+	}
+	wantPositions, err := codec.Encode(200, cancelPositions)
+	if err != nil {
+		t.Fatalf("encode expected cancelPositions: %v", err)
+	}
+	if !bytes.Equal(payloads[1], wantPositions) {
+		t.Fatalf("second shutdown frame = %x, want cancelPositions %x", payloads[1], wantPositions)
+	}
+
+	if err := <-shutdownErr; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if err := sub.Wait(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("active account summary Wait() = %v, want ErrClosed", err)
+	}
+	if err := positions.Wait(); !errors.Is(err, ErrClosed) {
+		t.Fatalf("active positions Wait() = %v, want ErrClosed", err)
+	}
+	if err := (&Client{engine: e}).Wait(); err != nil {
+		t.Fatalf("Wait() after graceful Shutdown = %v, want nil", err)
+	}
+	if _, err := wire.ReadFrame(peer); err == nil {
+		t.Fatal("connection remained open after cancellation was written")
+	}
+}
+
+func TestClientShutdownGivenPreviouslyClosedSubscriptionThenWaitsForPendingCancel(t *testing.T) {
+	t.Parallel()
+
+	peer, local := net.Pipe()
+	defer peer.Close()
+
+	tr := transport.New(local, nil, 0)
+	cfg := defaultConfig()
+	e := &engine{
+		cfg:                        cfg,
+		cmds:                       make(chan func(), 8),
+		incoming:                   make(chan any, 8),
+		transportErr:               make(chan transportLoss, 1),
+		connectResults:             make(chan connectResult),
+		ready:                      make(chan error, 1),
+		done:                       make(chan struct{}),
+		events:                     newObserver[Event](cfg.eventBuffer),
+		transport:                  tr,
+		transportGeneration:        1,
+		serverVersion:              200,
+		keyed:                      make(map[int]*route),
+		singletons:                 make(map[string]*route),
+		orders:                     make(map[int64]*orderRoute),
+		previews:                   make(map[int64]*previewRoute),
+		execDeliveries:             make(map[string]*execDelivery),
+		pendingSubscriptionCancels: make(map[transportWriteKey]OpKind),
+		snapshot:                   Snapshot{State: StateReady, ConnectionSeq: 1},
+	}
+	e.attachTransport(tr)
+	go e.run()
+
+	cancel := codec.CancelAccountSummary{ReqID: 9}
+	admitted := make(chan error, 1)
+	e.enqueue(func() { admitted <- e.cancelCurrentRequest(OpAccountSummary, cancel) })
+	if err := <-admitted; err != nil {
+		t.Fatalf("admit ordinary subscription cancel: %v", err)
+	}
+
+	ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	shutdownErr := make(chan error, 1)
+	go func() { shutdownErr <- (&Client{engine: e}).Shutdown(ctx) }()
+
+	payload, err := wire.ReadFrame(peer)
+	if err != nil {
+		t.Fatalf("read pending cancellation before shutdown EOF: %v", err)
+	}
+	want, err := codec.Encode(200, cancel)
+	if err != nil {
+		t.Fatalf("encode expected cancelAccountSummary: %v", err)
+	}
+	if !bytes.Equal(payload, want) {
+		t.Fatalf("pending shutdown frame = %x, want cancelAccountSummary %x", payload, want)
+	}
+	if err := <-shutdownErr; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	if _, err := wire.ReadFrame(peer); err == nil {
+		t.Fatal("connection remained open after pending cancellation completed")
+	}
+}
+
+func TestClientShutdownGivenBlockedCancelWriteWhenContextExpiresThenForcesClose(t *testing.T) {
+	t.Parallel()
+
+	peer, local := net.Pipe()
+	defer peer.Close()
+
+	tr := transport.New(local, nil, 0)
+	cfg := defaultConfig()
+	e := &engine{
+		cfg:                 cfg,
+		cmds:                make(chan func(), 8),
+		incoming:            make(chan any, 8),
+		transportErr:        make(chan transportLoss, 1),
+		connectResults:      make(chan connectResult),
+		ready:               make(chan error, 1),
+		done:                make(chan struct{}),
+		events:              newObserver[Event](cfg.eventBuffer),
+		transport:           tr,
+		transportGeneration: 1,
+		serverVersion:       200,
+		keyed: map[int]*route{
+			7: {
+				opKind:        OpAccountSummary,
+				subscription:  true,
+				cancelRequest: codec.CancelAccountSummary{ReqID: 7},
+				generation:    1,
+				close:         func(error) {},
+			},
+		},
+		singletons:     make(map[string]*route),
+		orders:         make(map[int64]*orderRoute),
+		previews:       make(map[int64]*previewRoute),
+		execDeliveries: make(map[string]*execDelivery),
+		snapshot:       Snapshot{State: StateReady, ConnectionSeq: 1},
+	}
+	e.attachTransport(tr)
+	go e.run()
+
+	ctx, stop := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stop()
+	err := (&Client{engine: e}).Shutdown(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown() error = %v, want context deadline exceeded", err)
+	}
+	select {
+	case <-e.done:
+	case <-time.After(time.Second):
+		t.Fatal("timed-out Shutdown did not force the client closed")
+	}
+}
+
+func TestClientShutdownGivenExpiredContextThenForcesClose(t *testing.T) {
+	t.Parallel()
+
+	e, _ := newObservedMarketDataEngine(t)
+	go e.run()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := (&Client{engine: e}).Shutdown(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown() error = %v, want context canceled", err)
+	}
+	select {
+	case <-e.done:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown with an expired context did not force the client closed")
+	}
+}
 
 func TestClientCloseWaitsCleanlyAndInterruptsActiveWork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

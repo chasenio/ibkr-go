@@ -717,7 +717,14 @@ func shouldCloseAttachedOrderRoutes(err error) bool {
 }
 
 func (e *engine) handleTransportWrite(write transportWrite) {
+	if e.handleShutdownWrite(write) {
+		return
+	}
 	key := transportWriteKey{transport: write.transport, id: write.result.ID}
+	if _, ok := e.pendingSubscriptionCancels[key]; ok {
+		delete(e.pendingSubscriptionCancels, key)
+		return
+	}
 	orderID, ok := e.pendingOrderWrites[key]
 	if !ok {
 		return
@@ -788,10 +795,18 @@ func (e *engine) scheduleUnclaimedExecEviction(execID string) {
 	})
 }
 
-func (e *engine) activeAccountSummarySubscriptions() int {
+// occupiedAccountSummarySlots keeps a broker slot reserved until its cancel
+// frame is fully written. The next request is therefore ordered after the
+// cancellation on the socket and cannot race IBKR's two-subscription limit.
+func (e *engine) occupiedAccountSummarySlots() int {
 	count := 0
 	for _, route := range e.keyed {
 		if route.subscription && route.opKind == OpAccountSummary {
+			count++
+		}
+	}
+	for _, opKind := range e.pendingSubscriptionCancels {
+		if opKind == OpAccountSummary {
 			count++
 		}
 	}

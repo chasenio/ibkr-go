@@ -23,7 +23,7 @@ type connectResult struct {
 }
 
 func (e *engine) startConnect(ctx context.Context, reconnect bool) {
-	if e.closed {
+	if e.closed || e.shuttingDown {
 		return
 	}
 	if e.connectCancel != nil {
@@ -137,7 +137,7 @@ func dialConnection(ctx context.Context, cfg config, advertisedMax int) connectR
 }
 
 func (e *engine) handleConnectResult(result connectResult) {
-	if e.closed || result.attempt != e.connectAttemptID {
+	if e.closed || e.shuttingDown || result.attempt != e.connectAttemptID {
 		if result.conn != nil {
 			_ = result.conn.Close()
 		}

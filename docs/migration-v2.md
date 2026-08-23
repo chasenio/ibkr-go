@@ -164,7 +164,11 @@ again.
 
 ## Close and order lifecycle
 
-`Client.Close()`, `Subscription.Close()`, and `OrderHandle.Close()` are commands and return no value. Observe terminal results with `Wait()` or `Err()` when needed.
+`Client.Shutdown(ctx)` is the graceful process-stop path: it writes active
+subscription cancellations before closing the socket. `Client.Close()` remains
+an immediate, non-draining command. `Subscription.Close()` and
+`OrderHandle.Close()` are commands and return no value. Observe terminal
+results with `Wait()` or `Err()` when needed.
 
 An `OrderHandle` no longer closes automatically on Filled, Cancelled,
 APICancelled, or Inactive because IBKR may deliver executions and

@@ -46,6 +46,11 @@ type engine struct {
 	// Completion is handled on the actor before transport loss, so an
 	// unwritten order cannot be mistaken for one IBKR received.
 	pendingOrderWrites map[transportWriteKey]int64
+	// pendingSubscriptionCancels retains admitted broker-side cancellation
+	// frames after their public route has been detached. Graceful shutdown must
+	// wait for these frames too, otherwise it can close the socket between
+	// Subscription.Close and the transport writer.
+	pendingSubscriptionCancels map[transportWriteKey]OpKind
 	// execDeliveries is the order-handle leg's per-ExecID delivery record.
 	// orderID routes commissions to the owning handle and its presence dedupes
 	// an Executions() snapshot replaying a fill the handle already saw live.
@@ -76,6 +81,8 @@ type engine struct {
 
 	bootstrap        bootstrapState
 	closed           bool
+	shuttingDown     bool
+	shutdown         *gracefulShutdown
 	lifetimeCtx      context.Context
 	cancelLifetime   context.CancelFunc
 	connectAttemptID uint64
@@ -154,11 +161,15 @@ type route struct {
 	emitResubscribed func(*engine)
 	validateResume   func(*engine) error
 	responsePending  func() bool
-	cancel           func(error)
-	close            func(error)
-	cleanup          func()
-	gapped           bool // true after Gap emitted; prevents double emission
-	generation       uint64
+	// cancelRequest is the exact broker-side teardown for this subscription.
+	// Keeping it on the actor-owned route lets Client.Shutdown drain active
+	// subscriptions without exposing request IDs outside the SDK.
+	cancelRequest codec.Message
+	cancel        func(error)
+	close         func(error)
+	cleanup       func()
+	gapped        bool // true after Gap emitted; prevents double emission
+	generation    uint64
 }
 
 type orderRoute struct {
@@ -200,25 +211,26 @@ func dialEngine(ctx context.Context, opts ...Option) (*engine, error) {
 	}
 
 	e := &engine{
-		cfg:                      cfg,
-		cmds:                     make(chan func(), 256),
-		incoming:                 make(chan any, 256),
-		transportErr:             make(chan transportLoss, 8),
-		connectResults:           make(chan connectResult),
-		ready:                    make(chan error, 1),
-		done:                     make(chan struct{}),
-		events:                   newObserver[Event](cfg.eventBuffer),
-		keyed:                    make(map[int]*route),
-		singletons:               make(map[string]*route),
-		orders:                   make(map[int64]*orderRoute),
-		previews:                 make(map[int64]*previewRoute),
-		pendingOrderWrites:       make(map[transportWriteKey]int64),
-		execDeliveries:           make(map[string]*execDelivery),
-		unknownInboundSeen:       make(map[int]struct{}),
-		malformedInboundSeen:     make(map[int]struct{}),
-		dirtySingletons:          make(map[string]uint64),
-		recentHistoricalRequests: make(map[string]time.Time),
-		nextReqID:                1,
+		cfg:                        cfg,
+		cmds:                       make(chan func(), 256),
+		incoming:                   make(chan any, 256),
+		transportErr:               make(chan transportLoss, 8),
+		connectResults:             make(chan connectResult),
+		ready:                      make(chan error, 1),
+		done:                       make(chan struct{}),
+		events:                     newObserver[Event](cfg.eventBuffer),
+		keyed:                      make(map[int]*route),
+		singletons:                 make(map[string]*route),
+		orders:                     make(map[int64]*orderRoute),
+		previews:                   make(map[int64]*previewRoute),
+		pendingOrderWrites:         make(map[transportWriteKey]int64),
+		pendingSubscriptionCancels: make(map[transportWriteKey]OpKind),
+		execDeliveries:             make(map[string]*execDelivery),
+		unknownInboundSeen:         make(map[int]struct{}),
+		malformedInboundSeen:       make(map[int]struct{}),
+		dirtySingletons:            make(map[string]uint64),
+		recentHistoricalRequests:   make(map[string]time.Time),
+		nextReqID:                  1,
 		snapshot: Snapshot{
 			State: StateDisconnected,
 		},
@@ -544,6 +556,9 @@ func (e *engine) connectionSeq() uint64 {
 }
 
 func (e *engine) isReady() bool {
+	if e.shuttingDown {
+		return false
+	}
 	if !e.hasReadyTransport() {
 		return false
 	}

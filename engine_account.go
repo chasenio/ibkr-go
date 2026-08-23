@@ -34,7 +34,7 @@ func (e *engine) SubscribeAccountSummary(ctx context.Context, req AccountSummary
 	resp := make(chan result, 1)
 
 	enqueueSubscriptionSetup(ctx, e, resp, func() {
-		if e.activeAccountSummarySubscriptions() >= 2 {
+		if e.occupiedAccountSummarySlots() >= 2 {
 			resp <- result{err: operationActive("account summary subscription limit reached")}
 			return
 		}

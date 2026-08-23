@@ -32,6 +32,13 @@ func DialContext(ctx context.Context, opts ...Option) (*Client, error) {
 // after this intentional shutdown.
 func (c *Client) Close() { c.engine.Close() }
 
+// Shutdown gracefully terminates the client. It stops admitting new work,
+// writes every available broker-side subscription cancellation on the current
+// connection, and closes the socket only after those frames are locally
+// complete. If ctx expires, Shutdown forces the connection closed and returns
+// the context cause. Close remains the immediate, non-draining alternative.
+func (c *Client) Shutdown(ctx context.Context) error { return c.engine.Shutdown(ctx) }
+
 // Done returns a channel closed when the client has terminated.
 func (c *Client) Done() <-chan struct{} { return c.engine.Done() }
 

@@ -28,6 +28,13 @@ func newKeyedSubscriptionRoute[T any](e *engine, cfg subscriptionConfig, reqID i
 			return
 		}
 		e.deleteKeyedRoute(reqID)
+		if e.shuttingDown {
+			// Shutdown already captured this route's exact cancel request. A
+			// concurrent context/public Close only releases the local handle;
+			// emitting it again would send a duplicate broker cancellation.
+			sub.closeWithErr(ErrClosed)
+			return
+		}
 		var err error
 		if cancel != nil {
 			err = e.cancelRouteSubscription(ownedRoute, opKind, cancel)
@@ -38,10 +45,11 @@ func newKeyedSubscriptionRoute[T any](e *engine, cfg subscriptionConfig, reqID i
 	sub = newEngineSubscription[T](cfg, e, actorCancel)
 	sub.requestID = protocolIDFromInt[RequestID](reqID)
 	ownedRoute = &route{
-		opKind:       opKind,
-		subscription: true,
-		resume:       cfg.resume,
-		generation:   e.transportGeneration,
+		opKind:        opKind,
+		subscription:  true,
+		resume:        cfg.resume,
+		cancelRequest: cancel,
+		generation:    e.transportGeneration,
 		handleAPIErr: func(msg codec.APIError, e *engine) {
 			if e.keyed[reqID] != ownedRoute {
 				return
@@ -70,6 +78,11 @@ func newSingletonSubscriptionRoute[T any](e *engine, cfg subscriptionConfig, key
 		if e.singletons[key] != ownedRoute {
 			return
 		}
+		if e.shuttingDown {
+			delete(e.singletons, key)
+			sub.closeWithErr(ErrClosed)
+			return
+		}
 		ambiguous := sub.snapshotWant && !sub.snapshotComplete()
 		if ownedRoute.responsePending != nil {
 			ambiguous = ownedRoute.responsePending()
@@ -89,10 +102,11 @@ func newSingletonSubscriptionRoute[T any](e *engine, cfg subscriptionConfig, key
 	}
 	sub = newEngineSubscription[T](cfg, e, actorCancel)
 	ownedRoute = &route{
-		opKind:       opKind,
-		subscription: true,
-		resume:       cfg.resume,
-		generation:   e.transportGeneration,
+		opKind:        opKind,
+		subscription:  true,
+		resume:        cfg.resume,
+		cancelRequest: cancel,
+		generation:    e.transportGeneration,
 		onDisconnect: func(_ *engine, err error) bool {
 			sub.closeWithErr(resumeRequired(err))
 			return false

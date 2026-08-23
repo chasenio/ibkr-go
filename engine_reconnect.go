@@ -26,6 +26,10 @@ func (e *engine) handleTransportLoss(loss transportLoss) {
 		e.transportRetireErr = nil
 	}
 	err := normalizeTransportErr(loss.err)
+	if e.shutdown != nil {
+		e.finishGracefulShutdown(errors.Join(ErrInterrupted, err))
+		return
+	}
 	e.invalidateReconnectStability()
 	if !e.bootstrap.readyReported {
 		e.rememberConnectionError(&ConnectError{Op: "bootstrap", Err: err})
@@ -55,7 +59,7 @@ func (e *engine) scheduleReconnect() {
 	e.reconnectAttempt++
 	time.AfterFunc(delay, func() {
 		e.enqueue(func() {
-			if e.closed || e.transport != nil || e.cfg.reconnect == ReconnectOff {
+			if e.closed || e.shuttingDown || e.transport != nil || e.cfg.reconnect == ReconnectOff {
 				return
 			}
 			lifetime := e.lifetimeCtx
@@ -305,7 +309,22 @@ func (e *engine) closeEngine(err, waitErr error) {
 	if e.closed {
 		return
 	}
+	var shutdownWaiters []chan error
+	var shutdownErr error
+	if state := e.shutdown; state != nil {
+		shutdownWaiters = state.waiters
+		shutdownErr = state.err
+		if !state.completed {
+			cause := err
+			if cause == nil || errors.Is(cause, ErrClosed) {
+				cause = ErrInterrupted
+			}
+			shutdownErr = errors.Join(shutdownErr, cause)
+		}
+		e.shutdown = nil
+	}
 	e.closed = true
+	e.shuttingDown = true
 	e.invalidateReconnectStability()
 	if e.connectCancel != nil {
 		e.connectCancel()
@@ -346,11 +365,15 @@ func (e *engine) closeEngine(err, waitErr error) {
 		delete(e.orders, id)
 	}
 	e.execDeliveries = make(map[string]*execDelivery)
+	e.pendingSubscriptionCancels = make(map[transportWriteKey]OpKind)
 	e.setState(StateClosed, 0, "", err)
 	e.reportReady(err)
 	e.waitMu.Lock()
 	e.waitErr = waitErr
 	e.waitMu.Unlock()
+	for _, waiter := range shutdownWaiters {
+		waiter <- shutdownErr
+	}
 	close(e.done)
 	e.events.Close()
 }
