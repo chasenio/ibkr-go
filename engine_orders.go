@@ -591,7 +591,7 @@ func (e *engine) ReplaceOrder(ctx context.Context, orderID int64, req PlaceOrder
 	}
 	req = clonePlaceOrderRequest(req)
 	return awaitFireAndForget(ctx, e, func(ctx context.Context) error {
-		if err := validateContractFieldSupport(req.Contract, "modify order", e.serverVersion, placeOrderContractFields(e.serverVersion)); err != nil {
+		if err := validateContractFieldSupport(req.Contract, "modify order", e.serverVersion, contractFieldsAll); err != nil {
 			return err
 		}
 		if err := validateOrderServerVersion(req.Order, e.serverVersion); err != nil {
