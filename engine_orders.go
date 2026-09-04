@@ -129,6 +129,14 @@ func (e *engine) SubscribeOpenOrders(ctx context.Context, scope OpenOrdersScope,
 				if scope != OpenOrdersScopeAuto {
 					refreshPending = false
 					sub.emitState(StreamSnapshotComplete, e.connectionSeq(), nil)
+					// reqOpenOrders and reqAllOpenOrders are finite snapshots.
+					// openOrderEnd is the authoritative response boundary, so a
+					// collector can release its request-ID-less route without
+					// dirtying or retiring the healthy transport generation.
+					if cfg.collectSnapshot && e.singletons[singletonOpenOrders] == ownedRoute {
+						delete(e.singletons, singletonOpenOrders)
+						sub.closeWithErr(nil)
+					}
 				}
 			}
 		}
