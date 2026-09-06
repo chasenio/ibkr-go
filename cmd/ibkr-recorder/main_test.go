@@ -211,9 +211,15 @@ func TestRecordReadyFileNamesCaptureDirectory(t *testing.T) {
 	root := t.TempDir()
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
+	done := make(chan struct{})
+	var recordErr error
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	go func() {
-		result <- record(ctx, recorderConfig{
+		defer close(done)
+		recordErr = record(ctx, recorderConfig{
 			listenAddr:     listenAddr,
 			upstreamAddr:   "upstream",
 			outRoot:        root,
@@ -236,23 +242,23 @@ func TestRecordReadyFileNamesCaptureDirectory(t *testing.T) {
 			captureDir = strings.TrimSpace(string(data))
 			break
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("read ready file: %v", err)
-		}
+		// Windows can expose the renamed path before releasing its rename
+		// handle. Readiness requires a successful read, not just file existence.
 		select {
-		case err := <-result:
-			t.Fatalf("record() ended before readiness: %v", err)
+		case <-done:
+			t.Fatalf("record() ended before readiness: %v", recordErr)
 		case <-poll.C:
 		case <-deadline.C:
-			t.Fatal("recorder did not publish readiness within 5s")
+			t.Fatalf("recorder did not publish readable readiness within 5s: %v", err)
 		}
 	}
 	if want := onlyCaptureDir(t, root); captureDir != want {
 		t.Fatalf("ready capture directory = %q, want %q", captureDir, want)
 	}
 	cancel()
-	if err := <-result; !errors.Is(err, context.Canceled) {
-		t.Fatalf("record() error = %v, want context.Canceled", err)
+	<-done
+	if !errors.Is(recordErr, context.Canceled) {
+		t.Fatalf("record() error = %v, want context.Canceled", recordErr)
 	}
 }
 

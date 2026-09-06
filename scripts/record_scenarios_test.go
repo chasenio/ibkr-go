@@ -203,7 +203,8 @@ func TestRecordScenariosInterruptionReapsBothChildren(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start record-scenarios: %v", err)
 	}
-	env.waitFor(t, "capture.started")
+	// Startup is not complete until the child has installed its signal handler.
+	env.waitFor(t, "capture.ready")
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal record-scenarios: %v", err)
 	}
@@ -396,6 +397,7 @@ echo "$scenario" >> "$STATE/capture.started"
 echo "capture $scenario" >> "$STATE/timeline"
 if [ "${CAPTURE_BLOCK:-}" = "$scenario" ]; then
 	trap 'echo "$scenario" >> "$STATE/capture.term"; echo "capture term" >> "$STATE/interrupt.timeline"; sleep 0.05; echo "$scenario" >> "$STATE/capture.closed"; echo "capture closed" >> "$STATE/interrupt.timeline"; exit 0' TERM INT HUP
+	echo "$scenario" >> "$STATE/capture.ready"
 	while true; do sleep 0.01; done
 fi
 if [ "${CAPTURE_FAIL:-}" = "$scenario" ]; then
